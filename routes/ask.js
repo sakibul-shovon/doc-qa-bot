@@ -1,29 +1,24 @@
 const express = require("express");
 const router = express.Router();
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const Groq = require("groq-sdk");
 const pineconeIndex = require("../config/pinecone");
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 router.post("/ask", async (req, res) => {
   try {
     const { question, documentId } = req.body;
     
-    
-    const colabUrl = process.env.COLAB_API_URL;
-    if (!colabUrl) {
-        return res.status(500).json({ error: "COLAB_API_URL is missing in .env file" });
-    }
-    
     if (!question) return res.status(400).json({ error: "Question is required" });
 
     console.log(`❓ Asking: ${question}`);
 
-   
+    // 1. Generate Embedding (Gemini)
     const embeddingModel = genAI.getGenerativeModel({ model: "models/gemini-embedding-001" });
     const result = await embeddingModel.embedContent(question);
     
-
     const queryEmbedding = result.embedding.values 
       ? Array.from(result.embedding.values).map(n => Number(n)).slice(0, 768) 
       : null;
@@ -48,39 +43,35 @@ router.post("/ask", async (req, res) => {
       .map((match) => match.metadata.text)
       .join("\n\n");
 
- 
-    console.log(" Sending context to Colab Llama...");
-    
-    const prompt = `
-      Context:
-      ${context}
-      
-      Question: ${question}
-      
-      Answer:
-    `;
+    // 3. Generate Answer using Groq
+    console.log(" Sending to Groq (Llama 3.3)...");
 
-    // Call your Python API on Colab
-    const colabResponse = await fetch(colabUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: prompt })
+    const completion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful and precise assistant. Answer the question based ONLY on the context provided."
+        },
+        {
+          role: "user",
+          content: `Context:\n${context}\n\nQuestion: ${question}`
+        }
+      ],
+      // ✅ UPDATED MODEL NAME
+      model: "llama-3.3-70b-versatile", 
+      temperature: 0.5,
     });
 
-    if (!colabResponse.ok) {
-        throw new Error(`Colab Error: ${colabResponse.statusText}`);
-    }
-
-    const colabData = await colabResponse.json();
+    const answer = completion.choices[0]?.message?.content || "No answer generated.";
 
     res.json({
-      answer: colabData.answer,
+      answer: answer,
       sources: searchResult.matches.map(m => m.metadata.text.substring(0, 100) + "...")
     });
 
   } catch (error) {
     console.error("❌ Ask Error:", error);
-    res.status(500).json({ error: "Failed to generate answer. Is Colab running?" });
+    res.status(500).json({ error: error.message || "Failed to generate answer." });
   }
 });
 
